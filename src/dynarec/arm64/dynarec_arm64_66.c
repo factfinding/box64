@@ -721,10 +721,8 @@ uintptr_t dynarec64_66(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
             SET_DFNONE(x1);
             if(box64_wine) {    // should this be done all the time?
                 TBZ_NEXT(xFlags, F_TF);
-                MOV64x(x1, addr);
-                STORE_XEMU_CALL(x1);
-                CALL(native_singlestep, -1);
-                BFCw(xFlags, F_TF, 1);
+                // go to epilog, TF should trigger at end of next opcode, so using Interpretor only
+                jump_to_epilog(dyn, addr, 0, ninst);
             }
             break;
 
@@ -948,7 +946,7 @@ uintptr_t dynarec64_66(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
                         SETFLAGS(X_CF|((u8==1)?X_OF:0), SF_SUBSET_PENDING);
                         GETEW(x1, 1);
                         u8 = F8;
-                        emit_rol16c(dyn, ninst, x1, u8&15, x4, x5);
+                        emit_rol16c(dyn, ninst, x1, u8, x4, x5);
                         EWBACK;
                     } else {
                         FAKEED;
@@ -962,7 +960,7 @@ uintptr_t dynarec64_66(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
                         SETFLAGS(X_CF|((u8==1)?X_OF:0), SF_SUBSET_PENDING);
                         GETEW(x1, 1);
                         u8 = F8;
-                        emit_ror16c(dyn, ninst, x1, u8&15, x4, x5);
+                        emit_ror16c(dyn, ninst, x1, u8, x4, x5);
                         EWBACK;
                     } else {
                         FAKEED;

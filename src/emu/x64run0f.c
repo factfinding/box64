@@ -95,6 +95,22 @@ uintptr_t Run0F(x64emu_t *emu, rex_t rex, uintptr_t addr, int *step)
                     emit_signal(emu, SIGILL, (void*)R_RIP, 0);
                     #endif
                     break;
+                case 0xE0:
+                case 0xE1:
+                case 0xE2:
+                case 0xE3:
+                case 0xE4:
+                case 0xE5:
+                case 0xE6:
+                case 0xE7:  /* SMSW Ew */
+                    ED->word[0] = (1<<0) | (1<<4); // only PE and ET set...
+                    break;
+                case 0xF9:  /* RDTSCP */
+                    tmp64u = ReadTSC(emu);
+                    R_RAX = tmp64u & 0xffffffff;
+                    R_RDX = tmp64u >> 32;
+                    R_RCX = 0;  // should be low of IA32_TSC
+                    break;
                 default:
                     return 0;
             } else
@@ -934,8 +950,8 @@ uintptr_t Run0F(x64emu_t *emu, rex_t rex, uintptr_t addr, int *step)
         GOCOND(0x80
             , tmp32s = F32S; CHECK_FLAGS(emu);
             , addr += tmp32s;
-            ,,STEP3
-        )                               /* 0x80 -> 0x8F Jxx */
+            ,,
+        )                               /* 0x80 -> 0x8F Jxx */ //STEP3
         GOCOND(0x90
             , nextop = F8; CHECK_FLAGS(emu);
             GETEB(0);

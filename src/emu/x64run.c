@@ -166,6 +166,13 @@ x64emurun:
             emu->segs_serial[_ES] = 0;
             break;
         GO(0x08, or)                    /*  OR 0x08 -> 0x0D */
+        case 0x0E:                      /* PUSH CS */
+            if(!rex.is32bits) {
+                unimp = 1;
+                goto fini;
+            }
+            Push32(emu, emu->segs[_CS]);  // even if a segment is a 16bits, a 32bits push/pop is done
+            break;
         case 0x0F:                      /* More instructions */
             switch(rep) {
                 case 1:
@@ -1400,7 +1407,32 @@ x64emurun:
             R_RSP = R_RBP;
             R_RBP = rex.is32bits?Pop32(emu):Pop64(emu);
             break;
-
+        case 0xCA:                      /* FAR RETN */
+            tmp16u = F16;
+            if(rex.is32bits) {
+                addr = Pop32(emu);
+                emu->segs[_CS] = Pop32(emu);    // no check, no use....
+            } else {
+                addr = Pop64(emu);
+                emu->segs[_CS] = Pop64(emu);    // no check, no use....
+            }
+            emu->segs_serial[_CS] = 0;
+            R_RSP += tmp16u;
+            // need to check status of CS register!
+            STEP2;
+            break;
+        case 0xCB:                      /* FAR RET */
+            if(rex.is32bits) {
+                addr = Pop32(emu);
+                emu->segs[_CS] = Pop32(emu);    // no check, no use....
+            } else {
+                addr = Pop64(emu);
+                emu->segs[_CS] = Pop64(emu);    // no check, no use....
+            }
+            emu->segs_serial[_CS] = 0;
+            // need to check status of CS register!
+            STEP2;
+            break;
         case 0xCC:                      /* INT 3 */
             #ifndef TEST_INTERPRETER
             x64Int3(emu, &addr);

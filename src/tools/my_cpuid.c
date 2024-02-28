@@ -7,17 +7,39 @@
 #include "my_cpuid.h"
 #include "../emu/x64emu_private.h"
 #include "debug.h"
+#include "x64emu.h"
 
 int get_cpuMhz()
 {
 	int MHz = 0;
-	FILE *f = fopen("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "r");
-	if(f) {
-		int r;
-		if(1==fscanf(f, "%d", &r))
-			MHz = r/1000;
-		fclose(f);
-	}
+    char *p = NULL;
+    if((p=getenv("BOX64_CPUMHZ"))) {
+        MHz = atoi(p);
+        return MHz;
+    }
+    char cpumhz[200];
+    sprintf(cpumhz, "%d", MHz?:1000);
+    setenv("BOX64_CPUMHZ", cpumhz, 1);  // set temp value incase box64 gets recursively called
+
+    int cpucore = 0;
+    while(cpucore!=-1) {
+        char cpufreq[4096];
+        sprintf(cpufreq, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpucore);
+        FILE *f = fopen(cpufreq, "r");
+        if(f) {
+            int r;
+            if(1==fscanf(f, "%d", &r)) {
+                r /= 1000;
+                if(MHz<r)
+                    MHz = r;
+            }
+            fclose(f);
+            ++cpucore;
+        }
+        else 
+            cpucore = -1;
+    }
+    #ifndef STATICBUILD
     if(!MHz) {
         // try with lscpu, grabbing the max frequency
         FILE* f = popen("lscpu | grep \"CPU max MHz:\" | sed -r 's/CPU max MHz:\\s{1,}//g'", "r");
@@ -46,8 +68,11 @@ int get_cpuMhz()
             }
         }
     }
+    #endif
 	if(!MHz)
 		MHz = 1000; // default to 1Ghz...
+    sprintf(cpumhz, "%d", MHz);
+    setenv("BOX64_CPUMHZ", cpumhz, 1);  // set actual value
 	return MHz;
 }
 static int nCPU = 0;
@@ -102,6 +127,13 @@ const char* getCpuName()
     if(done)
         return name;
     done = 1;
+    char *p = NULL;
+    if((p=getenv("BOX64_CPUNAME"))) {
+        strcpy(name, p);
+        return name;
+    }
+    setenv("BOX64_CPUNAME", name, 1);   // temporary set
+    #ifndef STATICBUILD
     FILE* f = popen("lscpu | grep \"Model name:\" | sed -r 's/Model name:\\s{1,}//g'", "r");
     if(f) {
         char tmp[200] = "";
@@ -118,6 +150,7 @@ const char* getCpuName()
                     *strchr(tmp,'\n') = ' ';
                 strncpy(name, tmp, 199);
             }
+            setenv("BOX64_CPUNAME", name, 1);
             return name;
         }
     }
@@ -136,9 +169,11 @@ const char* getCpuName()
             while(strchr(tmp, '\n'))
                 *strchr(tmp,'\n') = ' ';
             snprintf(name, 199, "unknown %s cpu", tmp);
+            setenv("BOX64_CPUNAME", name, 1);
             return name;
         }
     }
+    #endif
     // Nope, bye
     return name;
 }
@@ -182,7 +217,7 @@ void my_cpuid(x64emu_t* emu, uint32_t tmp32u)
     switch(tmp32u) {
         case 0x0:
             // emulate a P4. TODO: Emulate a Core2?
-            R_EAX = 0x0000000F;//0x80000004;
+            R_EAX = 0x00000015;//0x80000004;
             // return GenuineIntel
             R_EBX = 0x756E6547;
             R_EDX = 0x49656E69;
@@ -321,9 +356,33 @@ void my_cpuid(x64emu_t* emu, uint32_t tmp32u)
                 default: R_EAX = 0;
             }
             break;
+        case 0x14:  // Processor Trace Enumeration Main Leaf
+            switch(R_ECX) {
+                case 0: // main leaf
+                    R_EAX = 0;  // max sub-leaf
+                    R_EBX = 0;
+                    R_ECX = 0;
+                    R_EDX = 0;
+                    break;
+                default: R_EAX = 0;
+            }
+            break;
+        case 0x15:  // TSC core frenquency
+            R_EAX = 1;  // denominator
+            R_EBX = 1;  // numerator
+            {
+                uint64_t freq = ReadTSCFrequency(emu);
+                while(freq>100000000) {
+                    freq/=10;
+                    R_EAX *= 10;
+                }
+                R_ECX = freq;  // nominal frequency in Hz
+            }
+            R_EDX = 0;
+            break;
 
         case 0x80000000:        // max extended
-            R_EAX = 0x80000005;
+            R_EAX = 0x80000007;
             break;
         case 0x80000001:        //Extended Processor Signature and Feature Bits
             R_EAX = 0;  // reserved
@@ -361,6 +420,18 @@ void my_cpuid(x64emu_t* emu, uint32_t tmp32u)
             R_EBX = 0;
             R_ECX = 0;
             R_EDX = 0;
+            break;
+        case 0x80000006:    // L2 cache line size and associativity
+            R_EAX = 0;
+            R_EBX = 0;
+            R_ECX = 0;
+            R_EDX = 0;
+            break;
+        case 0x80000007:    // Invariant TSC
+            R_EAX = 0;
+            R_EBX = 0;
+            R_ECX = 0;
+            R_EDX = 0 | (1<<8); // Invariant TSC
             break;
         default:
             printf_log(LOG_INFO, "Warning, CPUID command %X unsupported (ECX=%08x)\n", tmp32u, R_ECX);

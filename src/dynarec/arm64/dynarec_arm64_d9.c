@@ -160,8 +160,16 @@ uintptr_t dynarec64_D9(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
                     }
                     ANDw_mask(x4, x4, 0, 3);    // (emu->top + i)&7
                 }
+                // load tag
+                ADDx_U12(x1, xEmu, offsetof(x64emu_t, p_regs));
+                LDRw_REG_LSL2(x3, x1, x4);
+                CMPSw_U12(x3, 0b11);    // empty
+                MOV32w(x3, 0b100000100000000);
+                CSELx(x4, x3, x4, cEQ); // empty: C3,C2,C0 = 101
+                B_MARK3(cEQ);
+                // load x2 with ST0 anyway, for sign extraction
                 ADDx_REG_LSL(x1, xEmu, x4, 3);
-                LDRx_U12(x2, x1, offsetof(x64emu_t, x87)); // load x2 with ST0 anyway, for sign extraction
+                LDRx_U12(x2, x1, offsetof(x64emu_t, x87));
             } else {
                 // simply move from cache reg to x2
                 v1 = dyn->n.x87reg[i1];
@@ -178,8 +186,7 @@ uintptr_t dynarec64_D9(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
             CSELx(x4, x4, x5, cEQ);
             B_MARK3(c__);
             MARK;
-            ORRx_mask(x4, xZR, 1, 0b001100, 0b001010); // 0x7ff0000000000000
-            CMPSx_REG(x2, x4);   // infinite/NaN?
+            CMPSx_U12(x1, 0x7ff);   // infinite/NaN?
             MOV32w(x5, 0b000010000000000); // normal: C3,C2,C0 = 010
             CSELx(x4, x5, x4, cNE);
             B_MARK3(cNE);

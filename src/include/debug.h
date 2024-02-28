@@ -13,6 +13,7 @@ extern int box64_dynarec_test;
 extern int box64_maxcpu;
 extern int box64_mmap32;
 extern int box64_ignoreint3;
+extern int box64_rdtsc;
 #ifdef DYNAREC
 extern int box64_dynarec_dump;
 extern int box64_dynarec_trace;
@@ -41,6 +42,7 @@ extern int arm64_crc32;
 extern int arm64_atomics;
 extern int arm64_sha1;
 extern int arm64_sha2;
+extern int arm64_uscat;
 extern int arm64_flagm;
 extern int arm64_flagm2;
 extern int arm64_frintts;
@@ -125,8 +127,10 @@ void printf_ftrace(const char* fmt, ...);
 #define EXPORTDYN
 #endif
 
+#ifndef STATICBUILD
 void init_malloc_hook(void);
-#ifdef ANDROID
+#endif
+#if defined(ANDROID) || defined(STATICBUILD)
 #define box_malloc      malloc
 #define box_realloc     realloc
 #define box_calloc      calloc

@@ -551,7 +551,15 @@ GO(4)   \
 GO(5)   \
 GO(6)   \
 GO(7)   \
-GO(8)
+GO(8)   \
+GO(9)   \
+GO(10)  \
+GO(11)  \
+GO(12)  \
+GO(13)  \
+GO(14)  \
+GO(15)
+
 
 
 // XNGeometryCallback
@@ -1413,10 +1421,6 @@ EXPORT void* my_XOpenDisplay(x64emu_t* emu, void* d)
 }
 
 #define CUSTOM_INIT                 \
-    getMy(lib);                     \
     if(box64_x11threads) my->XInitThreads();
-
-#define CUSTOM_FINI \
-    freeMy();
 
 #include "wrappedlib_init.h"

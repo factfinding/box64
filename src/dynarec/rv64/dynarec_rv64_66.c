@@ -253,19 +253,73 @@ uintptr_t dynarec64_66(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
             INST_NAME("XOR Ew, Gw");
             SETFLAGS(X_ALL, SF_SET_PENDING);
             nextop = F8;
-            GETGW(x2);
-            GETEW(x1, 0);
-            emit_xor16(dyn, ninst, x1, x2, x4, x5, x6);
-            EWBACK;
+            // try to determine ed and gd
+            ed = 0;
+            GETGD;
+            if (MODREG) {
+                GETED(0);
+            }
+            if (ed == gd) {
+                // optimize XOR Gw, Gw
+                CLEAR_FLAGS();
+                IFX(X_PEND) {
+                    SET_DF(x6, d_xor16);
+                } else IFX(X_ALL) {
+                    SET_DFNONE();
+                }
+                SRLI(ed, ed, 16);
+                SLLI(ed, ed, 16);
+                IFX(X_PEND) {
+                    SH(ed, xEmu, offsetof(x64emu_t, res));
+                }
+                IFX(X_ZF) {
+                    ORI(xFlags, xFlags, 1 << F_ZF);
+                }
+                IFX(X_PF) {
+                    ORI(xFlags, xFlags, 1 << F_PF);
+                }
+            } else {
+                GETGW(x2);
+                GETEW(x1, 0);
+                emit_xor16(dyn, ninst, x1, x2, x4, x5, x6);
+                EWBACK;
+            }
             break;
         case 0x33:
             INST_NAME("XOR Gw, Ew");
             SETFLAGS(X_ALL, SF_SET_PENDING);
             nextop = F8;
-            GETGW(x1);
-            GETEW(x2, 0);
-            emit_xor16(dyn, ninst, x1, x2, x4, x5, x6);
-            GWBACK;
+            // try to determine ed and gd
+            ed = 0;
+            GETGD;
+            if (MODREG) {
+                GETED(0);
+            }
+            if (ed == gd) {
+                // optimize XOR Gw, Gw
+                CLEAR_FLAGS();
+                IFX(X_PEND) {
+                    SET_DF(x6, d_xor16);
+                } else IFX(X_ALL) {
+                    SET_DFNONE();
+                }
+                SRLI(ed, ed, 16);
+                SLLI(ed, ed, 16);
+                IFX(X_PEND) {
+                    SH(ed, xEmu, offsetof(x64emu_t, res));
+                }
+                IFX(X_ZF) {
+                    ORI(xFlags, xFlags, 1 << F_ZF);
+                }
+                IFX(X_PF) {
+                    ORI(xFlags, xFlags, 1 << F_PF);
+                }
+            } else {
+                GETGW(x1);
+                GETEW(x2, 0);
+                emit_xor16(dyn, ninst, x1, x2, x4, x5, x6);
+                GWBACK;
+            }
             break;
         case 0x35:
             INST_NAME("XOR AX, Iw");
@@ -640,6 +694,32 @@ uintptr_t dynarec64_66(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int ni
             SRLI(xRDX, xRDX, 16);
             SLLI(xRDX, xRDX, 16);
             OR(xRDX, xRDX, x1);
+            break;
+        case 0x9C:
+            INST_NAME("PUSHF");
+            NOTEST(x1);
+            READFLAGS(X_ALL);
+            FLAGS_ADJUST_TO11(x3, xFlags, x2);
+            PUSH1_16(x3);
+            break;
+        case 0x9D:
+            INST_NAME("POPF");
+            SETFLAGS(X_ALL, SF_SET);
+            POP1_16(x1);
+            FLAGS_ADJUST_FROM11(x1, x1, x2);
+            LUI(x2, 0xffff0);
+            AND(xFlags, xFlags, x2);
+            OR(xFlags, xFlags, x1);
+            MOV32w(x1, 0x3F7FD7);
+            AND(xFlags, xFlags, x1);
+            ORI(xFlags, xFlags, 0x2);
+            SET_DFNONE();
+            if (box64_wine) { // should this be done all the time?
+                ANDI(x1, xFlags, 1 << F_TF);
+                CBZ_NEXT(x1);
+                // go to epilog, TF should trigger at end of next opcode, so using Interpretor only
+                jump_to_epilog(dyn, addr, 0, ninst);
+            }
             break;
         case 0xA1:
             INST_NAME("MOV EAX,Od");

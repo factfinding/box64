@@ -911,7 +911,7 @@ EXPORT int my_vsscanf(x64emu_t* emu, void* stream, void* fmt, x64_va_list_t b)
     return vsscanf(stream, fmt, VARARGS);
 }
 
-EXPORT int my__vsscanf(x64emu_t* emu, void* stream, void* fmt, void* b) __attribute__((alias("my_vsscanf")));
+EXPORT int my___vsscanf(x64emu_t* emu, void* stream, void* fmt, void* b) __attribute__((alias("my_vsscanf")));
 
 EXPORT int my_vswscanf(x64emu_t* emu, void* stream, void* fmt, x64_va_list_t b)
 {
@@ -1623,6 +1623,11 @@ void CreateCPUPresentFile(int fd)
     dummy = write(fd, buff, strlen(buff));
     (void)dummy;
 }
+void CreateClocksourceFile(int fd)
+{
+    size_t dummy;
+    write(fd, "tsc\n", strlen("tsc\n"));
+}
 
 #ifdef ANDROID
 static int shm_open(const char *name, int oflag, mode_t mode) {
@@ -1635,6 +1640,7 @@ static int shm_unlink(const char *name) {
 
 #define TMP_CPUINFO "box64_tmpcpuinfo"
 #define TMP_CPUTOPO "box64_tmpcputopo%d"
+#define TMP_CLOCKSOURCE "box64_tmpclocksource"
 #endif
 #define TMP_MEMMAP  "box64_tmpmemmap"
 #define TMP_CMDLINE "box64_tmpcmdline"
@@ -1677,6 +1683,15 @@ EXPORT int32_t my_open(x64emu_t* emu, void* pathname, int32_t flags, uint32_t mo
         if(tmp<0) return open(pathname, flags, mode); // error fallback
         shm_unlink(TMP_CPUINFO);    // remove the shm file, but it will still exist because it's currently in use
         CreateCPUInfoFile(tmp);
+        lseek(tmp, 0, SEEK_SET);
+        return tmp;
+    }
+    if(!strcmp((const char*)pathname, "/sys/bus/clocksource/devices/clocksource0/current_clocksource")) {
+        // special case to say tsc as current clocksource
+        int tmp = shm_open(TMP_CLOCKSOURCE, O_RDWR | O_CREAT, S_IRWXU);
+        if(tmp<0) return open(pathname, flags, mode); // error fallback
+        shm_unlink(TMP_CLOCKSOURCE);    // remove the shm file, but it will still exist because it's currently in use
+        CreateClocksourceFile(tmp);
         lseek(tmp, 0, SEEK_SET);
         return tmp;
     }
@@ -1767,6 +1782,15 @@ EXPORT int32_t my_open64(x64emu_t* emu, void* pathname, int32_t flags, uint32_t 
         lseek(tmp, 0, SEEK_SET);
         return tmp;
     }
+    if(!strcmp((const char*)pathname, "/sys/bus/clocksource/devices/clocksource0/current_clocksource")) {
+        // special case to say tsc as current clocksource
+        int tmp = shm_open(TMP_CLOCKSOURCE, O_RDWR | O_CREAT, S_IRWXU);
+        if(tmp<0) return open64(pathname, flags, mode); // error fallback
+        shm_unlink(TMP_CLOCKSOURCE);    // remove the shm file, but it will still exist because it's currently in use
+        CreateClocksourceFile(tmp);
+        lseek(tmp, 0, SEEK_SET);
+        return tmp;
+    }
     #endif
     return open64(pathname, flags, mode);
 }
@@ -1798,6 +1822,15 @@ EXPORT FILE* my_fopen64(x64emu_t* emu, const char* path, const char* mode)
         if(tmp<0) return fopen64(path, mode); // error fallback
         shm_unlink(TMP_CPUPRESENT);    // remove the shm file, but it will still exist because it's currently in use
         CreateCPUPresentFile(tmp);
+        lseek(tmp, 0, SEEK_SET);
+        return fdopen(tmp, mode);
+    }
+    if(strcmp(path, "/sys/bus/clocksource/devices/clocksource0/current_clocksource")==0) {
+        // special case to say tsc as current clocksource
+        int tmp = shm_open(TMP_CLOCKSOURCE, O_RDWR | O_CREAT, S_IRWXU);
+        if(tmp<0) return fopen64(path, mode); // error fallback
+        shm_unlink(TMP_CLOCKSOURCE);    // remove the shm file, but it will still exist because it's currently in use
+        CreateClocksourceFile(tmp);
         lseek(tmp, 0, SEEK_SET);
         return fdopen(tmp, mode);
     }
@@ -2794,6 +2827,11 @@ EXPORT void* my_mallinfo(x64emu_t* emu, void* p)
     return p;
 }
 
+#ifdef STATICBUILD
+void my_updateGlobalOpt() {}
+void my_checkGlobalOpt() {}
+#endif
+
 EXPORT int my_getopt(int argc, char* const argv[], const char *optstring)
 {
     my_updateGlobalOpt();
@@ -3095,7 +3133,6 @@ EXPORT long my_ptrace(x64emu_t* emu, int request, pid_t pid, void* addr, uint32_
 
 // Backtrace stuff
 
-#ifndef ANDROID
 #include "elfs/elfdwarf_private.h"
 EXPORT int my_backtrace(x64emu_t* emu, void** buffer, int size)
 {
@@ -3221,7 +3258,6 @@ EXPORT void my_backtrace_symbols_fd(x64emu_t* emu, uintptr_t* buffer, int size, 
         (void)dummy;
     }
 }
-#endif
 
 EXPORT int my_iopl(x64emu_t* emu, int level)
 {
@@ -3415,6 +3451,11 @@ EXPORT int my_prctl(x64emu_t* emu, int option, unsigned long arg2, unsigned long
     if(option==PR_SET_NAME) {
         printf_log(LOG_DEBUG, "BOX64: set process name to \"%s\"\n", (char*)arg2);
         ApplyParams((char*)arg2);
+        size_t l = strlen((char*)arg2);
+        if(l>4 && !strcasecmp((char*)arg2+l-4, ".exe")) {
+            printf_log(LOG_DEBUG, "BOX64: hacking orig command line to \"%s\"\n", (char*)arg2);
+            strcpy(my_context->orig_argv[0], (char*)arg2);
+        }
     }
     if(option==PR_SET_SECCOMP) {
         printf_log(LOG_INFO, "BOX64: ignoring prctl(PR_SET_SECCOMP, ...)\n");
@@ -3448,21 +3489,30 @@ EXPORT char* my_program_invocation_short_name = NULL;
 // ignoring this for now
 EXPORT char my___libc_single_threaded = 0;
 
+#ifdef STATICBUILD
+#include "libtools/static_libc.h"
+#endif
+
+#ifndef STATICBUILD
 #define PRE_INIT\
     if(1)                                                      \
         lib->w.lib = dlopen(NULL, RTLD_LAZY | RTLD_GLOBAL);    \
     else
+#endif
 
 #ifdef ANDROID
-#define NEEDED_LIBS   1,    \
+#define NEEDED_LIBS_DEF   4,\
+    "libpthread.so",        \
+    "libdl.so" ,            \
+    "libm.so",              \
     "libbsd.so"
 #define NEEDED_LIBS_234 4,  \
-    "libpthread.so.0",      \
-    "libdl.so.2" ,          \
+    "libpthread.so",        \
+    "libdl.so" ,            \
     "libm.so",              \
     "libbsd.so"
 #else
-#define NEEDED_LIBS   6,    \
+#define NEEDED_LIBS_DEF   6,\
     "ld-linux-x86-64.so.2", \
     "libpthread.so.0",      \
     "libdl.so.2",           \
@@ -3479,6 +3529,8 @@ EXPORT char my___libc_single_threaded = 0;
     "libbsd.so.0"
 #endif
 
+#undef HAS_MY
+
 #define CUSTOM_INIT         \
     box64->libclib = lib;   \
     /*InitCpuModel();*/         \
@@ -3492,7 +3544,7 @@ EXPORT char my___libc_single_threaded = 0;
     if(box64_isglibc234)                                                        \
         setNeededLibs(lib, NEEDED_LIBS_234);                                    \
     else                                                                        \
-        setNeededLibs(lib, NEEDED_LIBS);
+        setNeededLibs(lib, NEEDED_LIBS_DEF);
 
 #define CUSTOM_FINI \
     freeMy();       \

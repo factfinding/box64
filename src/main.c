@@ -57,6 +57,7 @@ int box64_mmap32 = 1;
 int box64_mmap32 = 0;
 #endif
 int box64_ignoreint3 = 0;
+int box64_rdtsc = 0;
 #ifdef DYNAREC
 int box64_dynarec = 1;
 int box64_dynarec_dump = 0;
@@ -219,6 +220,7 @@ void openFTrace(const char* newtrace)
                 ftrace = NULL;*/
                 if(!box64_nobanner)
                     printf("BOX64 Trace %s to \"%s\"\n", append?"appended":"redirected", p);
+                PrintBox64Version();
             }
         }
     }
@@ -998,6 +1000,30 @@ void LoadLogEnv()
         if(box64_ignoreint3)
             printf_log(LOG_INFO, "Will silently ignore INT3 in the code\n");
     }
+    p = getenv("BOX64_RDTSC");
+        if(p) {
+        if(strlen(p)==1) {
+            if(p[0]>='0' && p[0]<='0'+2)
+                box64_rdtsc = p[0]-'0';
+        }
+        if(box64_rdtsc==2) {
+            #if defined(ARM64) || defined(RV64)
+            box64_rdtsc = 0;    // allow hardxare counter
+            uint64_t freq = ReadTSCFrequency(NULL);
+            printf_log(LOG_INFO, "Hardware counter measured at %d Mhz, ", freq/1000);
+            if(freq>1000000000) {
+                printf_log(LOG_INFO, "keeping it\n");
+            } else {
+                box64_rdtsc = 1;
+                printf_log(LOG_INFO, "not using it\n");
+            }
+            #else
+            box64_rdtsc = 1;
+            printf_log(LOG_INFO, "Will use time-based emulation for rdtsc, even if hardware counter are available\n");
+            #endif
+        } else if(box64_rdtsc)
+            printf_log(LOG_INFO, "Will use time-based emulation for rdtsc, even if hardware counter are available\n");
+    }
     box64_pagesize = sysconf(_SC_PAGESIZE);
     if(!box64_pagesize)
         box64_pagesize = 4096;
@@ -1139,6 +1165,7 @@ void PrintFlags() {
     printf(" BOX64_ENV1='XXX=yyyy' will add XXX=yyyy env. var. and continue with BOX86_ENV2 ... until var doesn't exist\n");
     printf(" BOX64_JITGDB with 1 to launch \"gdb\" when a segfault is trapped, attached to the offending process\n");
     printf(" BOX64_MMAP32=1 to use 32bits address space mmap in priority for external mmap as soon a 32bits process are detected (default for Snapdragon build)\n");
+    printf(" BOX64_RDTSC to use a monotonic timer for rdtsc even if hardware counter are available (or check if precision is >=1Ghz for 2)\n");
 }
 
 void PrintHelp() {
@@ -1212,13 +1239,16 @@ void LoadEnvVars(box64context_t *context)
             printf_log(LOG_INFO, "\n");
         }
     }
-    // add libssl and libcrypto, prefer emulated version because of multiple version exist
+    // add libssl and libcrypto (and a few other) to prefer emulated version because of multiple version exist
     AddPath("libssl.so.1", &context->box64_emulated_libs, 0);
     AddPath("libssl.so.1.0.0", &context->box64_emulated_libs, 0);
     AddPath("libcrypto.so.1", &context->box64_emulated_libs, 0);
     AddPath("libcrypto.so.1.0.0", &context->box64_emulated_libs, 0);
     AddPath("libunwind.so.8", &context->box64_emulated_libs, 0);
     AddPath("libpng12.so.0", &context->box64_emulated_libs, 0);
+    AddPath("libcurl.so.4", &context->box64_emulated_libs, 0);
+    AddPath("libtbbmalloc.so.2", &context->box64_emulated_libs, 0);
+    AddPath("libtbbmalloc_proxy.so.2", &context->box64_emulated_libs, 0);
 
     if(getenv("BOX64_SSE_FLUSHTO0")) {
         if (strcmp(getenv("BOX64_SSE_FLUSHTO0"), "1")==0) {
@@ -1310,10 +1340,10 @@ void setupTraceInit()
             if(s_trace_start || s_trace_end)
                 SetTraceEmu(s_trace_start, s_trace_end);
         } else {
-            if (GetGlobalSymbolStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, NULL, NULL)) {
+            if (GetGlobalSymbolStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, 0, NULL)) {
                 SetTraceEmu(s_trace_start, s_trace_end);
                 printf_log(LOG_INFO, "TRACE on %s only (%p-%p)\n", p, (void*)s_trace_start, (void*)s_trace_end);
-            } else if(GetLocalSymbolStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, NULL, NULL)) {
+            } else if(GetLocalSymbolStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, 0, NULL)) {
                 SetTraceEmu(s_trace_start, s_trace_end);
                 printf_log(LOG_INFO, "TRACE on %s only (%p-%p)\n", p, (void*)s_trace_start, (void*)s_trace_end);
             } else {
@@ -1326,6 +1356,56 @@ void setupTraceInit()
         if(p)
             if (strcmp(p, "0"))
                 SetTraceEmu(0, 1);
+    }
+#endif
+}
+
+void setupTraceMapLib(lib_t* maplib)
+{
+#ifdef HAVE_TRACE
+    if(!trace_func)
+        return;
+    char* p = trace_func;
+    uintptr_t s_trace_start=0, s_trace_end=0;
+    if(maplib) {
+        if (GetGlobalSymbolStartEnd(maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, 0, NULL)) {
+            SetTraceEmu(s_trace_start, s_trace_end);
+            printf_log(LOG_INFO, "TRACE on %s only (%p-%p)\n", p, (void*)s_trace_start, (void*)s_trace_end);
+            box_free(trace_func);
+            trace_func = NULL;
+            return;
+        } else if(GetLocalSymbolStartEnd(maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, 0, NULL)) {
+            SetTraceEmu(s_trace_start, s_trace_end);
+            printf_log(LOG_INFO, "TRACE on %s only (%p-%p)\n", p, (void*)s_trace_start, (void*)s_trace_end);
+            box_free(trace_func);
+            trace_func = NULL;
+            return;
+        } else if(GetSymTabStartEnd(maplib, p, &s_trace_start, &s_trace_end)) {
+            SetTraceEmu(s_trace_start, s_trace_end);
+            printf_log(LOG_INFO, "TRACE on %s only (%p-%p)\n", p, (void*)s_trace_start, (void*)s_trace_end);
+            box_free(trace_func);
+            trace_func = NULL;
+            return;
+        }
+    }
+    if (my_context->elfs && GetGlobalSymbolStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, 0, NULL)) {
+        SetTraceEmu(s_trace_start, s_trace_end);
+        printf_log(LOG_INFO, "TRACE on %s only (%p-%p)\n", p, (void*)s_trace_start, (void*)s_trace_end);
+        box_free(trace_func);
+        trace_func = NULL;
+    } else if(my_context->elfs && GetLocalSymbolStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, 0, NULL)) {
+        SetTraceEmu(s_trace_start, s_trace_end);
+        printf_log(LOG_INFO, "TRACE on %s only (%p-%p)\n", p, (void*)s_trace_start, (void*)s_trace_end);
+        box_free(trace_func);
+        trace_func = NULL;
+    } else if(GetSymTabStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end)) {
+        SetTraceEmu(s_trace_start, s_trace_end);
+        printf_log(LOG_INFO, "TRACE on %s only (%p-%p)\n", p, (void*)s_trace_start, (void*)s_trace_end);
+        box_free(trace_func);
+        trace_func = NULL;
+    } else {
+        printf_log(LOG_NONE, "Warning, Symbol to trace (\"%s\") not found. Trying to set trace later\n", p);
+        SetTraceEmu(0, 1);  // disabling trace, mostly
     }
 #endif
 }
@@ -1354,10 +1434,10 @@ void setupTrace()
                 }
             }
         } else {
-            if (my_context->elfs && GetGlobalSymbolStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, NULL, NULL)) {
+            if (my_context->elfs && GetGlobalSymbolStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, 0, NULL)) {
                 SetTraceEmu(s_trace_start, s_trace_end);
                 printf_log(LOG_INFO, "TRACE on %s only (%p-%p)\n", p, (void*)s_trace_start, (void*)s_trace_end);
-            } else if(my_context->elfs && GetLocalSymbolStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, NULL, NULL)) {
+            } else if(my_context->elfs && GetLocalSymbolStartEnd(my_context->maplib, p, &s_trace_start, &s_trace_end, NULL, -1, NULL, 0, NULL)) {
                 SetTraceEmu(s_trace_start, s_trace_end);
                 printf_log(LOG_INFO, "TRACE on %s only (%p-%p)\n", p, (void*)s_trace_start, (void*)s_trace_end);
             } else {
@@ -1371,7 +1451,9 @@ void setupTrace()
     }
 #endif
 }
+#ifndef STATICBUILD
 void endMallocHook();
+#endif
 
 void endBox64()
 {
@@ -1381,7 +1463,9 @@ void endBox64()
     // then call all the fini
     dynarec_log(LOG_DEBUG, "endBox64() called\n");
     box64_quit = 1;
+    #ifndef STATICBUILD
     endMallocHook();
+    #endif
     x64emu_t* emu = thread_get_emu();
     void startTimedExit();
     startTimedExit();
@@ -1456,6 +1540,18 @@ static void free_contextargv()
         box_free(my_context->argv[i]);
 }
 
+static void add_argv(const char* what) {
+    int there = 0;
+    for(int i=1; i<my_context->argc && !there; ++i)
+        if(!strcmp(my_context->argv[i], what))
+            there = 1;
+    if(!there) {
+        my_context->argv = (char**)box_realloc(my_context->argv, (my_context->argc+1)*sizeof(char*));
+        my_context->argv[my_context->argc] = box_strdup(what);
+        my_context->argc++;
+    }
+}
+
 static void load_rcfiles()
 {
     #ifndef TERMUX
@@ -1478,10 +1574,14 @@ static void load_rcfiles()
     }
 }
 
+#ifndef STATICBUILD
 void pressure_vessel(int argc, const char** argv, int nextarg, const char* prog);
+#endif
 extern char** environ;
 int main(int argc, const char **argv, char **env) {
+    #ifndef STATICBUILD
     init_malloc_hook();
+    #endif
     init_auxval(argc, argv, environ?environ:env);
     // analogue to QEMU_VERSION in qemu-user-mode emulation
     if(getenv("BOX64_VERSION")) {
@@ -1565,7 +1665,7 @@ int main(int argc, const char **argv, char **env) {
             //wine_preloaded = 1;
         }
     }
-    #if 1
+    #ifndef STATICBUILD
     // pre-check for pressure-vessel-wrap
     if(strstr(prog, "pressure-vessel-wrap")==(prog+strlen(prog)-strlen("pressure-vessel-wrap"))) {
         printf_log(LOG_INFO, "BOX64: pressure-vessel-wrap detected\n");
@@ -1574,6 +1674,7 @@ int main(int argc, const char **argv, char **env) {
     #endif
     int ld_libs_args = -1;
     int is_custom_gstreamer = 0;
+    int wine_steam = 0;
     // check if this is wine
     if(!strcmp(prog, "wine64")
      || !strcmp(prog, "wine64-development") 
@@ -1608,6 +1709,23 @@ int main(int argc, const char **argv, char **env) {
                 //box64_nogtk = 1;
                 //is_custom_gstreamer = 1;
                 box64_custom_gstreamer = box_strdup(tmp);
+            }
+        }
+        // if program being called is wine_steam (rudimentary check...) and if no other argument are there
+        if(argv[nextarg+1] && argv[nextarg+1][0]!='-' /*&& argc==(nextarg+2)*/) {
+            if(!strcasecmp(argv[nextarg+1], "steam.exe"))
+                wine_steam = 1;
+            else if(!strcasecmp(argv[nextarg+1], "steam"))
+                wine_steam = 1;
+            if(!wine_steam) {
+                const char* pp = strrchr(argv[nextarg+1], '/');
+                if(pp && !strcasecmp(pp+1, "steam.exe"))
+                    wine_steam = 1;
+                else {
+                    pp = strrchr(argv[nextarg+1], '\\');
+                    if(pp && !strcasecmp(pp+1, "steam.exe"))
+                        wine_steam = 1;
+                }
             }
         }
     } else if(strstr(prog, "ld-musl-x86_64.so.1")) {
@@ -1751,29 +1869,19 @@ int main(int argc, const char **argv, char **env) {
     }
     if(box64_nosandbox)
     {
-        // check if sandbox is already there
-        int there = 0;
-        for(int i=1; i<my_context->argc && !there; ++i)
-            if(!strcmp(my_context->argv[i], "--no-sandbox"))
-                there = 1;
-        if(!there) {
-            my_context->argv = (char**)box_realloc(my_context->argv, (my_context->argc+1)*sizeof(char*));
-            my_context->argv[my_context->argc] = box_strdup("--no-sandbox");
-            my_context->argc++;
-        }
+        add_argv("--no-sandbox");
     }
     if(box64_inprocessgpu)
     {
-        // check if in-process-gpu is already there
-        int there = 0;
-        for(int i=1; i<my_context->argc && !there; ++i)
-            if(!strcmp(my_context->argv[i], "--in-process-gpu"))
-                there = 1;
-        if(!there) {
-            my_context->argv = (char**)box_realloc(my_context->argv, (my_context->argc+1)*sizeof(char*));
-            my_context->argv[my_context->argc] = box_strdup("--in-process-gpu");
-            my_context->argc++;
-        }
+        add_argv("--in-process-gpu");
+    }
+    if(wine_steam) {
+        printf_log(LOG_INFO, "Steam.exe detected, adding -cef-single-process -cef-in-process-gpu -cef-disable-sandbox -no-cef-sandbox -cef-disable-breakpad to parameters");
+        add_argv("-cef-single-process");
+        add_argv("-cef-in-process-gpu");
+        add_argv("-cef-disable-sandbox");
+        add_argv("-no-cef-sandbox");
+        add_argv("-cef-disable-breakpad");
     }
 
     // check if file exist
@@ -1931,6 +2039,8 @@ int main(int argc, const char **argv, char **env) {
         memset(endp - diff, 0, diff); // fill reminder with NULL
         for(int i=nextarg; i<argc; ++i)
             argv[i] -= diff;    // adjust strings
+        my_context->orig_argc = argc;
+        my_context->orig_argv = (char**)argv;
     }
     box64_isglibc234 = GetNeededVersionForLib(elf_header, "libc.so.6", "GLIBC_2.34");
     if(box64_isglibc234)
@@ -1959,11 +2069,14 @@ int main(int argc, const char **argv, char **env) {
     thread_set_emu(emu);
 
     // export symbols
-    AddSymbols(my_context->maplib, GetMapSymbols(elf_header), GetWeakSymbols(elf_header), GetLocalSymbols(elf_header), elf_header);
+    AddSymbols(my_context->maplib, elf_header);
     if(wine_preloaded) {
-        uintptr_t wineinfo = FindSymbol(GetMapSymbols(elf_header), "wine_main_preload_info", -1, NULL, 1, NULL);
-        if(!wineinfo) wineinfo = FindSymbol(GetWeakSymbols(elf_header), "wine_main_preload_info", -1, NULL, 1, NULL);
-        if(!wineinfo) wineinfo = FindSymbol(GetLocalSymbols(elf_header), "wine_main_preload_info", -1, NULL, 1, NULL);
+        uintptr_t wineinfo = 0;
+        int ver = -1, veropt = 0;
+        const char* vername = NULL;
+        if(!ElfGetGlobalSymbolStartEnd(elf_header, &wineinfo, NULL, "wine_main_preload_info", &ver, &vername, 1, &veropt))
+            if(!ElfGetWeakSymbolStartEnd(elf_header, &wineinfo, NULL, "wine_main_preload_info", &ver, &vername, 1, &veropt))
+                ElfGetLocalSymbolStartEnd(elf_header, &wineinfo, NULL, "wine_main_preload_info", &ver, &vername, 1, &veropt);
         if(!wineinfo) {printf_log(LOG_NONE, "Warning, Symbol wine_main_preload_info not found\n");}
         else {
             *(void**)wineinfo = get_wine_prereserve();
@@ -1980,32 +2093,32 @@ int main(int argc, const char **argv, char **env) {
         for(int i=0; i<ld_preload.size; ++i) {
             needed_libs_t* tmp = new_neededlib(1);
             tmp->names[0] = ld_preload.paths[i];
-            if(AddNeededLib(my_context->maplib, 0, 0, tmp, elf_header, my_context, emu)) {
+            if(AddNeededLib(my_context->maplib, 0, 0, 0, tmp, elf_header, my_context, emu)) {
                 printf_log(LOG_INFO, "Warning, cannot pre-load %s\n", tmp->names[0]);
                 RemoveNeededLib(my_context->maplib, 0, tmp, my_context, emu);
             } else {
                 for(int j=0; j<tmp->size; ++j)
                     add1lib_neededlib(my_context->preload, tmp->libs[j], tmp->names[j]);
-                free_neededlib(tmp);
             }
+            free_neededlib(tmp);
         }
     }
     FreeCollection(&ld_preload);
     // Call librarian to load all dependant elf
-    if(LoadNeededLibs(elf_header, my_context->maplib, 0, 0, my_context, emu)) {
+    if(LoadNeededLibs(elf_header, my_context->maplib, 0, 0, 0, my_context, emu)) {
         printf_log(LOG_NONE, "Error: Loading needed libs in elf %s\n", my_context->argv[0]);
         FreeBox64Context(&my_context);
         return -1;
     }
     // reloc...
     printf_log(LOG_DEBUG, "And now export symbols / relocation for %s...\n", ElfName(elf_header));
-    if(RelocateElf(my_context->maplib, NULL, 0, elf_header)) {
+    if(RelocateElf(my_context->maplib, NULL, 0, 0, elf_header)) {
         printf_log(LOG_NONE, "Error: Relocating symbols in elf %s\n", my_context->argv[0]);
         FreeBox64Context(&my_context);
         return -1;
     }
     // and handle PLT
-    RelocateElfPlt(my_context->maplib, NULL, 0, elf_header);
+    RelocateElfPlt(my_context->maplib, NULL, 0, 0, elf_header);
     // deferred init
     setupTraceInit();
     RunDeferredElfInit(emu);

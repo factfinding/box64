@@ -792,26 +792,35 @@
     LDP_REGS(R12, R13);     \
     LDP_REGS(R14, R15)
 
+#if STEP == 0
+#define X87_PUSH_OR_FAIL(var, dyn, ninst, scratch, t)   var = x87_do_push(dyn, ninst, scratch, t)
+#define X87_PUSH_EMPTY_OR_FAIL(dyn, ninst, scratch)     x87_do_push_empty(dyn, ninst, scratch)
+#define X87_POP_OR_FAIL(dyn, ninst, scratch)            x87_do_pop(dyn, ninst, scratch)
+#else
 #define X87_PUSH_OR_FAIL(var, dyn, ninst, scratch, t) \
-    if (dyn->n.stack == +8) {                         \
-        DEFAULT;                                      \
+    if (dyn->n.x87stack == +8) {                      \
+        if(box64_dynarec_dump) dynarec_log(LOG_INFO, " Warning, suspicious x87 Push, stack=%d on inst %d\n", dyn->n.x87stack, ninst); \
+        dyn->abort = 1;                               \
         return addr;                                  \
     }                                                 \
-    var = x87_do_push(dyn, ninst, scratch, t);
+    var = x87_do_push(dyn, ninst, scratch, t)
 
 #define X87_PUSH_EMPTY_OR_FAIL(dyn, ninst, scratch) \
-    if (dyn->n.stack == +8) {                       \
-        DEFAULT;                                    \
+    if (dyn->n.x87stack == +8) {                       \
+        if(box64_dynarec_dump) dynarec_log(LOG_INFO, " Warning, suspicious x87 Push, stack=%d on inst %d\n", dyn->n.x87stack, ninst); \
+        dyn->abort = 1;                             \
         return addr;                                \
     }                                               \
-    x87_do_push_empty(dyn, ninst, scratch);
+    x87_do_push_empty(dyn, ninst, scratch)
 
 #define X87_POP_OR_FAIL(dyn, ninst, scratch) \
-    if (dyn->n.stack == -8) {                \
-        DEFAULT;                             \
+    if (dyn->n.x87stack == -8) {                \
+        if(box64_dynarec_dump) dynarec_log(LOG_INFO, " Warning, suspicious x87 Pop, stack=%d on inst %d\n", dyn->n.x87stack, ninst); \
+        dyn->abort = 1;                      \
         return addr;                         \
     }                                        \
-    x87_do_pop(dyn, ninst, scratch);
+    x87_do_pop(dyn, ninst, scratch)
+#endif
 
 #define SET_DFNONE(S)    if(!dyn->f.dfnone) {STRw_U12(wZR, xEmu, offsetof(x64emu_t, df)); dyn->f.dfnone=1;}
 #define SET_DF(S, N)        \
@@ -1071,6 +1080,8 @@ void* arm64_next(x64emu_t* emu, uintptr_t addr);
 #define emit_ror8c      STEPNAME(emit_ror8c)
 #define emit_rol16c     STEPNAME(emit_rol16c)
 #define emit_ror16c     STEPNAME(emit_ror16c)
+#define emit_rcl8c      STEPNAME(emit_rcl8c)
+#define emit_rcr8c      STEPNAME(emit_rcr8c)
 #define emit_shrd32c    STEPNAME(emit_shrd32c)
 #define emit_shrd32     STEPNAME(emit_shrd32)
 #define emit_shld32c    STEPNAME(emit_shld32c)
@@ -1090,6 +1101,7 @@ void* arm64_next(x64emu_t* emu, uintptr_t addr);
 #define x87_get_neoncache STEPNAME(x87_get_neoncache)
 #define x87_get_st      STEPNAME(x87_get_st)
 #define x87_get_st_empty  STEPNAME(x87_get_st)
+#define x87_free        STEPNAME(x87_free)
 #define x87_forget      STEPNAME(x87_forget)
 #define x87_reget_st    STEPNAME(x87_reget_st)
 #define x87_stackcount  STEPNAME(x87_stackcount)
@@ -1108,7 +1120,6 @@ void* arm64_next(x64emu_t* emu, uintptr_t addr);
 
 #define fpu_pushcache   STEPNAME(fpu_pushcache)
 #define fpu_popcache    STEPNAME(fpu_popcache)
-#define fpu_reset       STEPNAME(fpu_reset)
 #define fpu_reset_cache STEPNAME(fpu_reset_cache)
 #define fpu_propagate_stack STEPNAME(fpu_propagate_stack)
 #define fpu_purgecache  STEPNAME(fpu_purgecache)
@@ -1221,6 +1232,8 @@ void emit_rol8c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s
 void emit_ror8c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s4);
 void emit_rol16c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s4);
 void emit_ror16c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s4);
+void emit_rcl8c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s4);
+void emit_rcr8c(dynarec_arm_t* dyn, int ninst, int s1, uint32_t c, int s3, int s4);
 void emit_shrd32c(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, uint32_t c, int s3, int s4);
 void emit_shld32c(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, uint32_t c, int s3, int s4);
 void emit_shrd32(dynarec_arm_t* dyn, int ninst, rex_t rex, int s1, int s2, int s5, int s3, int s4);
@@ -1253,6 +1266,8 @@ int x87_get_neoncache(dynarec_arm_t* dyn, int ninst, int s1, int s2, int a);
 int x87_get_st(dynarec_arm_t* dyn, int ninst, int s1, int s2, int a, int t);
 // get vfpu register for a x87 reg, create the entry if needed. Do not fetch the Stx if not already in cache
 int x87_get_st_empty(dynarec_arm_t* dyn, int ninst, int s1, int s2, int a, int t);
+// Free st, using the FFREE opcode (so it's freed but stack is not moved)
+void x87_free(dynarec_arm_t* dyn, int ninst, int s1, int s2, int s3, int st);
 // refresh a value from the cache ->emu and then forget the cache (nothing done if value is not cached)
 void x87_forget(dynarec_arm_t* dyn, int ninst, int s1, int s2, int st);
 // refresh the cache value from emu
@@ -1319,8 +1334,6 @@ void sse_purge07cache(dynarec_arm_t* dyn, int ninst, int s1);
 // Push current value to the cache
 void sse_reflect_reg(dynarec_arm_t* dyn, int ninst, int a);
 // common coproc helpers
-// reset the cache
-void fpu_reset(dynarec_arm_t* dyn);
 // reset the cache with n
 void fpu_reset_cache(dynarec_arm_t* dyn, int ninst, int reset_n);
 // propagate stack state

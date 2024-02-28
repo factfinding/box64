@@ -467,6 +467,11 @@ EXPORT void my3_OPENSSL_sk_pop_free(x64emu_t* emu, void* s, void* cb)
     my->OPENSSL_sk_pop_free(s, find_free_fnc_Fct(cb));
 }
 
+EXPORT void* my3_OPENSSL_sk_new(x64emu_t* emu, void* f)
+{
+    return my->OPENSSL_sk_new(find_cmp_fnc_Fct(f));
+}
+
 EXPORT void my3_ERR_set_error(x64emu_t* emu, int lib, int reason, void* fmt, uintptr_t* b)
 {
     myStackAlign(emu, (const char*)fmt, b, emu->scratch, R_EAX, 3);
@@ -501,11 +506,6 @@ EXPORT void my3_EVP_MD_do_all_provided(x64emu_t* emu, void* ctx, void* cb, void*
     my->EVP_MD_do_all_provided(ctx, find_do_all_provided_cb_Fct(cb), arg);
 }
 
-#define CUSTOM_INIT \
-    SETALT(my3_);   \
-    getMy(lib);
-
-#define CUSTOM_FINI \
-    freeMy();
+#define ALTMY my3_
 
 #include "wrappedlib_init.h"

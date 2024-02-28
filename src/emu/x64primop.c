@@ -137,7 +137,7 @@ uint16_t aaa16(x64emu_t *emu, uint16_t d)
 
 /****************************************************************************
 REMARKS:
-Implements the AAA instruction and side effects.
+Implements the AAS instruction and side effects.
 ****************************************************************************/
 uint16_t aas16(x64emu_t *emu, uint16_t d)
 {
@@ -178,7 +178,7 @@ uint16_t aad16(x64emu_t *emu, uint16_t d, uint8_t base)
 	CLEAR_FLAG(F_AF);
 	CLEAR_FLAG(F_OF);
 	CONDITIONAL_SET_FLAG(l & 0x80, F_SF);
-	CONDITIONAL_SET_FLAG(l == 0, F_ZF);
+	CONDITIONAL_SET_FLAG((l&0xff) == 0, F_ZF);
 	CONDITIONAL_SET_FLAG(PARITY(l & 0xff), F_PF);
 	return l;
 }
@@ -201,7 +201,7 @@ uint16_t aam16(x64emu_t *emu, uint8_t d, uint8_t base)
 	CLEAR_FLAG(F_AF);
 	CLEAR_FLAG(F_OF);
 	CONDITIONAL_SET_FLAG(l & 0x80, F_SF);
-	CONDITIONAL_SET_FLAG(l == 0, F_ZF);
+	CONDITIONAL_SET_FLAG((l&0xff) == 0, F_ZF);
 	CONDITIONAL_SET_FLAG(PARITY(l & 0xff), F_PF);
     return l;
 }
@@ -260,25 +260,18 @@ uint16_t adc16(x64emu_t *emu, uint16_t d, uint16_t s)
 
 uint32_t adc32(x64emu_t *emu, uint32_t d, uint32_t s)
 {
-	uint32_t lo;	/* all operands in native machine order */
-	uint32_t hi;
-	uint32_t res;
-	uint32_t cc;
+	uint64_t res;   /* all operands in native machine order */
+	uint64_t cc;
 
 	CHECK_FLAGS(emu);
 
-	if (ACCESS_FLAG(F_CF)) {
-		lo = 1 + (d & 0xFFFF) + (s & 0xFFFF);
-		res = 1 + d + s;
-		}
-	else {
-		lo = (d & 0xFFFF) + (s & 0xFFFF);
-		res = d + s;
-		}
-	hi = (lo >> 16) + (d >> 16) + (s >> 16);
+	if (ACCESS_FLAG(F_CF))
+		res = 1LL + d + s;
+	else
+		res = (uint64_t)d + s;
 
-	CONDITIONAL_SET_FLAG(hi & 0x10000, F_CF);
-	CONDITIONAL_SET_FLAG(!res, F_ZF);
+	CONDITIONAL_SET_FLAG(res & 0x100000000LL, F_CF);
+	CONDITIONAL_SET_FLAG((res & 0xffffffff) == 0, F_ZF);
 	CONDITIONAL_SET_FLAG(res & 0x80000000, F_SF);
 	CONDITIONAL_SET_FLAG(PARITY(res & 0xff), F_PF);
 
@@ -286,7 +279,8 @@ uint32_t adc32(x64emu_t *emu, uint32_t d, uint32_t s)
 	cc = (s & d) | ((~res) & (s | d));
 	CONDITIONAL_SET_FLAG(XOR2(cc >> 30), F_OF);
 	CONDITIONAL_SET_FLAG(cc & 0x8, F_AF);
-	return res;
+	return (uint32_t)res;
+
 }
 
 uint64_t adc64(x64emu_t *emu, uint64_t d, uint64_t s)
@@ -413,11 +407,15 @@ uint8_t daa8(x64emu_t *emu, uint8_t d)
 {
 	uint32_t res = d;
 	CHECK_FLAGS(emu);
+	int cf = ACCESS_FLAG(F_CF);
+	CLEAR_FLAG(F_CF);
 	if ((d & 0xf) > 9 || ACCESS_FLAG(F_AF)) {
 		res += 6;
 		SET_FLAG(F_AF);
-	}
-	if (d > 0x99 || ACCESS_FLAG(F_CF)) {
+		CONDITIONAL_SET_FLAG(cf || d&0x100, F_CF);
+	} else
+		CLEAR_FLAG(F_AF);
+	if (d > 0x99 || cf) {
 		res += 0x60;
 		SET_FLAG(F_CF);
 	} else
@@ -439,7 +437,7 @@ uint8_t das8(x64emu_t *emu, uint8_t d)
 	uint32_t newcf = 0;
 	if ((d & 0xf) > 9 || ACCESS_FLAG(F_AF)) {
 		res -= 6;
-		newcf = (d < 6);
+		newcf = ACCESS_FLAG(F_CF) || (d < 6);
 		SET_FLAG(F_AF);
 	} else
 		CLEAR_FLAG(F_AF);
@@ -556,7 +554,7 @@ uint32_t rcl32(x64emu_t *emu, uint32_t d, uint8_t s)
 	s = s&0x1f;
 
 	res = d;
-	if ((cnt = s % 33) != 0) {
+	if ((cnt = s) != 0) {
 		cf = (d >> (32 - cnt)) & 0x1;
 		res = (d << cnt);
 		mask = (1 << (cnt - 1)) - 1;
@@ -578,7 +576,7 @@ uint64_t rcl64(x64emu_t *emu, uint64_t d, uint8_t s)
 	s = s&0x3f;
 
 	res = d;
-	if ((cnt = s % 65) != 0) {
+	if ((cnt = s) != 0) {
 		cf = (d >> (64 - cnt)) & 0x1;
 		res = (d << cnt);
 		mask = (1LL << (cnt - 1)) - 1;
@@ -713,7 +711,7 @@ uint32_t rcr32(x64emu_t *emu, uint32_t d, uint8_t s)
 
 	/* rotate right through carry */
 	res = d;
-	if ((cnt = s % 33) != 0) {
+	if ((cnt = s) != 0) {
 		if (cnt == 1) {
 			cf = d & 0x1;
 			ocf = ACCESS_FLAG(F_CF) != 0;
@@ -742,7 +740,7 @@ uint64_t rcr64(x64emu_t *emu, uint64_t d, uint8_t s)
 
 	/* rotate right through carry */
 	res = d;
-	if ((cnt = s % 65) != 0) {
+	if ((cnt = s) != 0) {
 		if (cnt == 1) {
 			cf = d & 0x1;
 			ocf = ACCESS_FLAG(F_CF) != 0;
@@ -959,10 +957,12 @@ Implements the SHLD instruction and side effects.
 uint16_t shld16 (x64emu_t *emu, uint16_t d, uint16_t fill, uint8_t s)
 {
 	unsigned int cnt, res, cf;
-	RESET_FLAGS(emu);
 
 	s = s&0x1f;
 	cnt = s % 16;
+	if(!s)
+		return d;
+	RESET_FLAGS(emu);
 	if (s < 16) {
 		if (cnt > 0) {
 			res = (d << cnt) | (fill >> (16-cnt));
@@ -997,9 +997,11 @@ uint16_t shld16 (x64emu_t *emu, uint16_t d, uint16_t fill, uint8_t s)
 uint32_t shld32 (x64emu_t *emu, uint32_t d, uint32_t fill, uint8_t s)
 {
 	unsigned int cnt, res, cf;
-	RESET_FLAGS(emu);
 
 	s = s&0x1f;
+	if(!s)
+		return d;
+	RESET_FLAGS(emu);
 	cnt = s % 32;
 	if (cnt > 0) {
 		res = (d << cnt) | (fill >> (32-cnt));
@@ -1022,9 +1024,11 @@ uint32_t shld32 (x64emu_t *emu, uint32_t d, uint32_t fill, uint8_t s)
 uint64_t shld64 (x64emu_t *emu, uint64_t d, uint64_t fill, uint8_t s)
 {
 	uint64_t cnt, res, cf;
-	RESET_FLAGS(emu);
 
 	s = s&0x3f;
+	if(!s)
+		return d;
+	RESET_FLAGS(emu);
 	cnt = s % 64;
 	if (cnt > 0) {
 		res = (d << cnt) | (fill >> (64-cnt));
@@ -1051,9 +1055,11 @@ Implements the SHRD instruction and side effects.
 uint16_t shrd16 (x64emu_t *emu, uint16_t d, uint16_t fill, uint8_t s)
 {
 	unsigned int cnt, res, cf;
-	RESET_FLAGS(emu);
 
 	s = s&0x1f;
+	if(!s)
+		return d;
+	RESET_FLAGS(emu);
 	cnt = s % 16;
 	if (s < 16) {
 		if (cnt > 0) {
@@ -1098,9 +1104,11 @@ uint16_t shrd16 (x64emu_t *emu, uint16_t d, uint16_t fill, uint8_t s)
 uint32_t shrd32 (x64emu_t *emu, uint32_t d, uint32_t fill, uint8_t s)
 {
 	unsigned int cnt, res, cf;
-	RESET_FLAGS(emu);
 
 	s = s&0x1f;
+	if(!s)
+		return d;
+	RESET_FLAGS(emu);
 	cnt = s % 32;
 	if (cnt > 0) {
 		cf = d & (1 << (cnt - 1));
@@ -1124,9 +1132,11 @@ uint64_t shrd64 (x64emu_t *emu, uint64_t d, uint64_t fill, uint8_t s)
 {
 	unsigned int cnt;
 	uint64_t res, cf;
-	RESET_FLAGS(emu);
 
 	s = s&0x3f;
+	if(!s)
+		return d;
+	RESET_FLAGS(emu);
 	cnt = s % 64;
 	if (cnt > 0) {
 		cf = d & (1LL << (cnt - 1));

@@ -270,6 +270,16 @@ static void sigstack_key_alloc() {
     pthread_key_create(&sigstack_key, sigstack_destroy);
 }
 
+// this allow handling "safe" function that just abort if accessing a bad address
+static __thread JUMPBUFF signal_jmpbuf;
+#ifdef ANDROID
+#define SIG_JMPBUF signal_jmpbuf
+#else
+#define SIG_JMPBUF &signal_jmpbuf
+#endif
+static __thread int signal_jmpbuf_active = 0;
+
+
 //1<<1 is mutex_prot, 1<<8 is mutex_dyndump
 #define is_memprot_locked (1<<1)
 #define is_dyndump_locked (1<<8)
@@ -404,6 +414,13 @@ EXPORT int my_sigaltstack(x64emu_t* emu, const x64_stack_t* ss, x64_stack_t* oss
         errno = EFAULT;
         return -1;
     }
+    signal_jmpbuf_active = 1;
+    if(sigsetjmp(SIG_JMPBUF, 1)) {
+        // segfault while gathering function name...
+        errno = EFAULT;
+        return -1;
+    }
+
     x64_stack_t *new_ss = (x64_stack_t*)pthread_getspecific(sigstack_key);
     if(oss) {
         if(!new_ss) {
@@ -417,6 +434,7 @@ EXPORT int my_sigaltstack(x64emu_t* emu, const x64_stack_t* ss, x64_stack_t* oss
         }
     }
     if(!ss) {
+        signal_jmpbuf_active = 0;
         return 0;
     }
     printf_log(LOG_DEBUG, "%04d|sigaltstack called ss=%p[flags=0x%x, sp=%p, ss=0x%lx], oss=%p\n", GetTID(), ss, ss->ss_flags, ss->ss_sp, ss->ss_size, oss);
@@ -429,7 +447,7 @@ EXPORT int my_sigaltstack(x64emu_t* emu, const x64_stack_t* ss, x64_stack_t* oss
         if(new_ss)
             box_free(new_ss);
         pthread_setspecific(sigstack_key, NULL);
-
+        signal_jmpbuf_active = 0;
         return 0;
     }
 
@@ -440,7 +458,7 @@ EXPORT int my_sigaltstack(x64emu_t* emu, const x64_stack_t* ss, x64_stack_t* oss
     new_ss->ss_size = ss->ss_size;
 
     pthread_setspecific(sigstack_key, new_ss);
-
+    signal_jmpbuf_active = 0;
     return 0;
 }
 
@@ -1229,15 +1247,10 @@ void my_box64signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
 {
     // sig==SIGSEGV || sig==SIGBUS || sig==SIGILL || sig==SIGABRT here!
     int log_minimum = (box64_showsegv)?LOG_NONE:((sig==SIGSEGV && my_context->is_sigaction[sig])?LOG_DEBUG:LOG_INFO);
-    static JUMPBUFF signal_jmpbuf;
-    #ifdef ANDROID
-    #define SIG_JMPBUF signal_jmpbuf
-    #else
-    #define SIG_JMPBUF &signal_jmpbuf
-    #endif
-    static int signal_jmpbuf_active = 0;
-    if(signal_jmpbuf_active)
+    if(signal_jmpbuf_active) {
+        signal_jmpbuf_active = 0;
         longjmp(SIG_JMPBUF, 1);
+    }
     if((sig==SIGSEGV || sig==SIGBUS) && box64_quit) {
         printf_log(LOG_INFO, "Sigfault/Segbus while quitting, exiting silently\n");
         _exit(box64_exit_code);    // Hack, segfault while quiting, exit silently
@@ -1355,7 +1368,7 @@ void my_box64signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
                 if(addr>=db->x64_addr && addr<(db->x64_addr+db->x64_size)) {
                     dynarec_log(LOG_INFO, "Auto-SMC detected, getting out of current Dynablock (%p, x64addr=%p, need_test=%d/%d/%d)!\n", db, db->x64_addr, db_need_test, db->dirty, db->always_test);
                 } else {
-                    dynarec_log(LOG_INFO, "Dynablock (%p, x64addr=%p, need_test=%d/%d/%d) unprotected, getting out at %p!\n", db, db->x64_addr, db_need_test, db->dirty, db->always_test, (void*)R_RIP);
+                    dynarec_log(LOG_INFO, "Dynablock (%p, x64addr=%p, need_test=%d/%d/%d) unprotected, getting out at %p (%p)!\n", db, db->x64_addr, db_need_test, db->dirty, db->always_test, (void*)R_RIP, (void*)addr);
                 }
                 //relockMutex(Locks);
                 unlock_signal();
@@ -1386,7 +1399,8 @@ void my_box64signalhandler(int32_t sig, siginfo_t* info, void * ucntx)
             dynarec_log(LOG_INFO, "Warning, addr inside current dynablock!\n");
         }
         // mark stuff as unclean
-        cleanDBFromAddressRange(((uintptr_t)addr)&~(box64_pagesize-1), box64_pagesize, 0);
+        if(box64_dynarec)
+            cleanDBFromAddressRange(((uintptr_t)addr)&~(box64_pagesize-1), box64_pagesize, 0);
         static void* glitch_pc = NULL;
         static void* glitch_addr = NULL;
         static uint32_t glitch_prot = 0;
@@ -1511,7 +1525,7 @@ dynarec_log(/*LOG_DEBUG*/LOG_INFO, "Repeated SIGSEGV with Access error on %p for
 #error Unsupported Architecture
 #endif //arch
 #endif //DYNAREC
-        if(!db && (sig==SIGSEGV) && ((uintptr_t)addr==x64pc-1))
+        if(!db && (sig==SIGSEGV) && ((uintptr_t)addr==(x64pc-1)))
             x64pc--;
         if(log_minimum<=box64_log) {
             signal_jmpbuf_active = 1;
@@ -1550,13 +1564,15 @@ dynarec_log(/*LOG_DEBUG*/LOG_INFO, "Repeated SIGSEGV with Access error on %p for
             }
         }
         print_cycle_log(log_minimum);
-#ifndef ANDROID
+
         if((box64_showbt || sig==SIGABRT) && log_minimum<=box64_log) {
             // show native bt
             #define BT_BUF_SIZE 100
             int nptrs;
             void *buffer[BT_BUF_SIZE];
             char **strings;
+            
+            #ifndef ANDROID
             nptrs = backtrace(buffer, BT_BUF_SIZE);
             strings = backtrace_symbols(buffer, nptrs);
             if(strings) {
@@ -1565,6 +1581,7 @@ dynarec_log(/*LOG_DEBUG*/LOG_INFO, "Repeated SIGSEGV with Access error on %p for
                 free(strings);
             } else
                 printf_log(log_minimum, "NativeBT: none (%d/%s)\n", errno, strerror(errno));
+            #endif
             extern int my_backtrace_ip(x64emu_t* emu, void** buffer, int size);   // in wrappedlibc
             extern char** my_backtrace_symbols(x64emu_t* emu, uintptr_t* buffer, int size);
             // save and set real RIP/RSP
@@ -1619,7 +1636,7 @@ dynarec_log(/*LOG_DEBUG*/LOG_INFO, "Repeated SIGSEGV with Access error on %p for
             GO(RIP);
             #undef GO
         }
-#endif
+
         if(log_minimum<=box64_log) {
             static const char* reg_name[] = {"RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI", " R8", " R9","R10","R11", "R12","R13","R14","R15"};
             static const char* seg_name[] = {"ES", "CS", "SS", "DS", "FS", "GS"};
@@ -1629,7 +1646,7 @@ dynarec_log(/*LOG_DEBUG*/LOG_INFO, "Repeated SIGSEGV with Access error on %p for
             if(db)
                 hash = X31_hash_code(db->x64_addr, db->x64_size);
             printf_log(log_minimum, "%04d|%s @%p (%s) (x64pc=%p/%s:\"%s\", rsp=%p, stack=%p:%p own=%p fp=%p), for accessing %p (code=%d/prot=%x), db=%p(%p:%p/%p:%p/%s:%s, hash:%x/%x) handler=%p",
-                GetTID(), signame, pc, name, (void*)x64pc, elfname?elfname:"???", x64name?x64name:"???", rsp,
+                GetTID(), signame, pc, name, (void*)x64pc, elfname?:"???", x64name?:"???", rsp,
                 emu->init_stack, emu->init_stack+emu->size_stack, emu->stack2free, (void*)R_RBP,
                 addr, info->si_code,
                 prot, db, db?db->block:0, db?(db->block+db->size):0,
@@ -1671,7 +1688,7 @@ dynarec_log(/*LOG_DEBUG*/LOG_INFO, "Repeated SIGSEGV with Access error on %p for
             #warning TODO
 #endif
 #else
-            printf_log(log_minimum, "%04d|%s @%p (%s) (x64pc=%p/%s:\"%s\", rsp=%p), for accessing %p (code=%d)", GetTID(), signame, pc, name, (void*)x64pc, elfname?elfname:"???", x64name?x64name:"???", rsp, addr, info->si_code);
+            printf_log(log_minimum, "%04d|%s @%p (%s) (x64pc=%p/%s:\"%s\", rsp=%p), for accessing %p (code=%d)", GetTID(), signame, pc, name, (void*)x64pc, elfname?:"???", x64name?:"???", rsp, addr, info->si_code);
 #endif
             if(!shown_regs) {
                 for (int i=0; i<16; ++i) {

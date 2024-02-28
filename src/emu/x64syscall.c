@@ -231,6 +231,7 @@ static const scwrap_t syscallwrap[] = {
     [233] = {__NR_epoll_ctl, 4},
     #endif
     [234] = {__NR_tgkill, 3},
+    [237] = {__NR_mbind, 6},
     [238] = {__NR_set_mempolicy, 3},
     [239] = {__NR_get_mempolicy, 5},
     [247] = {__NR_waitid, 5},
@@ -281,6 +282,10 @@ static const scwrap_t syscallwrap[] = {
     [318] = {__NR_getrandom, 3},
     [319] = {__NR_memfd_create, 2},
     [324] = {__NR_membarrier, 2},
+    #ifdef __NR_copy_file_range
+    // TODO: call back if unavailable?
+    [326] = {__NR_copy_file_range, 6},
+    #endif
     #ifdef __NR_statx
     // TODO: implement fallback if __NR_statx is not defined
     [332] = {__NR_statx, 5},

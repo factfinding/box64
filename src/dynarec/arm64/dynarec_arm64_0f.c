@@ -78,6 +78,30 @@ uintptr_t dynarec64_0F(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
                     *need_epilog = 0;
                     *ok = 0;
                     break;
+                case 0xE0:
+                case 0xE1:
+                case 0xE2:
+                case 0xE3:
+                case 0xE4:
+                case 0xE5:
+                case 0xE6:
+                case 0xE7:
+                    INST_NAME("SMSW Ed");
+                    ed = xRAX+(nextop&7)+(rex.b<<3);
+                    MOV32w(ed, (1<<0) | (1<<4)); // only PE and ET set...
+                    break;
+                case 0xF9:
+                    INST_NAME("RDTSCP");
+                    NOTEST(x1);
+                    if(box64_rdtsc) {
+                        CALL_(ReadTSC, x1, x3);
+                    } else {
+                        MRS_cntvct_el0(x1);
+                    }
+                    LSRx(xRDX, x1, 32);
+                    MOVw_REG(xRAX, x1);   // wipe upper part
+                    MOVw_REG(xRCX, xZR);    // IA32_TSC, 0 for now
+                    break;
                 default:
                     DEFAULT;
             } else
@@ -470,10 +494,13 @@ uintptr_t dynarec64_0F(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
         case 0x31:
             INST_NAME("RDTSC");
             NOTEST(x1);
-            MESSAGE(LOG_DUMP, "Need Optimization\n");
-            CALL(ReadTSC, x3);    // will return the u64 in x3
-            LSRx(xRDX, x3, 32);
-            MOVw_REG(xRAX, x3);   // wipe upper part
+            if(box64_rdtsc) {
+                CALL_(ReadTSC, x1, x3);
+            } else {
+                MRS_cntvct_el0(x1);
+            }
+            LSRx(xRDX, x1, 32);
+            MOVw_REG(xRAX, x1);   // wipe upper part
             break;
 
         case 0x38:
@@ -1569,7 +1596,17 @@ uintptr_t dynarec64_0F(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
 
         GOCOND(0x90, "SET", "Eb");
         #undef GO
-
+        case 0xA0:
+            INST_NAME("PUSH FS");
+            LDRH_U12(x2, xEmu, offsetof(x64emu_t, segs[_FS]));
+            PUSH1z(x2);
+            break;
+        case 0xA1:
+            INST_NAME("POP FS");
+            POP1z(x2);
+            STRH_U12(x2, xEmu, offsetof(x64emu_t, segs[_FS]));
+            STRw_U12(xZR, xEmu, offsetof(x64emu_t, segs_serial[_FS]));
+            break;
         case 0xA2:
             INST_NAME("CPUID");
             NOTEST(x1);
@@ -1627,6 +1664,18 @@ uintptr_t dynarec64_0F(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
             B_NEXT(cEQ);
             emit_shld32(dyn, ninst, rex, ed, gd, x3, x5, x4);
             WBACK;
+            break;
+
+        case 0xA8:
+            INST_NAME("PUSH GS");
+            LDRH_U12(x2, xEmu, offsetof(x64emu_t, segs[_GS]));
+            PUSH1z(x2);
+            break;
+        case 0xA9:
+            INST_NAME("POP GS");
+            POP1z(x2);
+            STRH_U12(x2, xEmu, offsetof(x64emu_t, segs[_GS]));
+            STRw_U12(xZR, xEmu, offsetof(x64emu_t, segs_serial[_GS]));
             break;
 
         case 0xAB:
@@ -2425,6 +2474,20 @@ uintptr_t dynarec64_0F(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int nin
             URHADD_8(v0, v0, v1);
             break;
 
+        case 0xE2:
+            INST_NAME("PSRAD Gm,Em");
+            nextop = F8;
+            GETGM(d0);
+            GETEM(d1, 0);
+            v0 = fpu_get_scratch(dyn);
+            v1 = fpu_get_scratch(dyn);
+            UQXTN_32(v0, d1);
+            MOVI_32(v1, 31);
+            UMIN_32(v0, v0, v1);        // limit to 0 .. +31 values
+            NEG_32(v0, v0);
+            VDUP_32(v0, v0, 0);         // only the low 8bits will be used anyway
+            SSHL_32(d0, d0, v0);
+            break;
         case 0xE3:
             INST_NAME("PAVGW Gm,Em");
             nextop = F8;

@@ -685,6 +685,9 @@
 // Branch to MARK if reg1==reg2 (use j64)
 #define BEQ_MARK(reg1, reg2)     Bxx_gen(EQ, MARK, reg1, reg2)
 #define BEQ_MARKi(reg1, reg2, i) Bxx_geni(EQ, MARK, reg1, reg2, i)
+// Branch to MARK if reg1==0 (use j64)
+#define BEQZ_MARK(reg)     BEQ_MARK(reg, xZR)
+#define BEQZ_MARKi(reg, i) BEQ_MARKi(reg, xZR, i)
 // Branch to MARK if reg1!=reg2 (use j64)
 #define BNE_MARK(reg1, reg2)     Bxx_gen(NE, MARK, reg1, reg2)
 #define BNE_MARKi(reg1, reg2, i) Bxx_geni(NE, MARK, reg1, reg2, i)
@@ -730,6 +733,11 @@
 #define BEQ_NEXT(reg1, reg2)                                                  \
     j64 = (dyn->insts) ? (dyn->insts[ninst].epilog - (dyn->native_size)) : 0; \
     BEQ(reg1, reg2, j64)
+
+// Branch to NEXT if reg1!=reg2 (use j64)
+#define BNE_NEXT(reg1, reg2)                                                  \
+    j64 = (dyn->insts) ? (dyn->insts[ninst].epilog - (dyn->native_size)) : 0; \
+    BNE(reg1, reg2, j64)
 
 // Branch to NEXT if reg1==0 (use j64)
 #define CBZ_NEXT(reg1)                                                        \
@@ -866,11 +874,11 @@
         }                                                             \
     }
 
-// Adjust the xFlags bit 11 -> bit 5, result in reg (can be xFlags, but not s1)
-#define FLAGS_ADJUST_FROM11(reg, s1) \
-    ANDI(reg, xFlags, ~(1 << 5));    \
-    SRLI(s1, reg, 11 - 5);           \
-    ANDI(s1, s1, 1 << 5);            \
+// Adjust the flags bit 11 -> bit 5, result in reg (can be same as flags, but not s1)
+#define FLAGS_ADJUST_FROM11(reg, flags, s1) \
+    ANDI(reg, flags, ~(1 << 5));            \
+    SRLI(s1, reg, 11 - 5);                  \
+    ANDI(s1, s1, 1 << 5);                   \
     OR(reg, reg, s1)
 
 // Adjust the xFlags bit 5 -> bit 11, src and dst can be the same (and can be xFlags, but not s1)
@@ -882,27 +890,35 @@
     SLLI(dst, dst, 11 - 5);             \
     OR(dst, dst, s1)
 
+#if STEP == 0
+#define X87_PUSH_OR_FAIL(var, dyn, ninst, scratch, t)   var = x87_do_push(dyn, ninst, scratch, t)
+#define X87_PUSH_EMPTY_OR_FAIL(dyn, ninst, scratch)     x87_do_push_empty(dyn, ninst, scratch)
+#define X87_POP_OR_FAIL(dyn, ninst, scratch)            x87_do_pop(dyn, ninst, scratch)
+#else
 #define X87_PUSH_OR_FAIL(var, dyn, ninst, scratch, t) \
     if (dyn->e.stack == +8) {                         \
-        DEFAULT;                                      \
+        if(box64_dynarec_dump) dynarec_log(LOG_INFO, " Warning, suspicious x87 Push, stack=%d on inst %d\n", dyn->e.x87stack, ninst); \
+        dyn->abort = 1;                               \
         return addr;                                  \
     }                                                 \
     var = x87_do_push(dyn, ninst, scratch, t);
 
 #define X87_PUSH_EMPTY_OR_FAIL(dyn, ninst, scratch) \
     if (dyn->e.stack == +8) {                       \
-        DEFAULT;                                    \
+        if(box64_dynarec_dump) dynarec_log(LOG_INFO, " Warning, suspicious x87 Push, stack=%d on inst %d\n", dyn->e.x87stack, ninst); \
+        dyn->abort = 1;                               \
         return addr;                                \
     }                                               \
     x87_do_push_empty(dyn, ninst, scratch);
 
 #define X87_POP_OR_FAIL(dyn, ninst, scratch) \
     if (dyn->e.stack == -8) {                \
-        DEFAULT;                             \
+        if(box64_dynarec_dump) dynarec_log(LOG_INFO, " Warning, suspicious x87 Pop, stack=%d on inst %d\n", dyn->e.x87stack, ninst); \
+        dyn->abort = 1;                               \
         return addr;                         \
     }                                        \
     x87_do_pop(dyn, ninst, scratch);
-
+#endif
 
 #ifndef MAYSETFLAGS
 #define MAYSETFLAGS()
@@ -918,7 +934,7 @@
             BEQ(x3, xZR, j64);                      \
         }                                           \
         CALL_(UpdateFlags, -1, 0);                  \
-        FLAGS_ADJUST_FROM11(xFlags, x3);            \
+        FLAGS_ADJUST_FROM11(xFlags, xFlags, x3);    \
         MARKF;                                      \
         dyn->f.pending = SF_SET;                    \
         SET_DFOK();                                 \
@@ -1153,6 +1169,7 @@ void* rv64_next(x64emu_t* emu, uintptr_t addr);
 #define emit_ror32c         STEPNAME(emit_ror32c)
 #define emit_shrd32c        STEPNAME(emit_shrd32c)
 #define emit_shld32c        STEPNAME(emit_shld32c)
+#define emit_shrd32         STEPNAME(emit_shld32)
 #define emit_shld32         STEPNAME(emit_shld32)
 #define emit_shld16c        STEPNAME(emit_shld16c)
 #define emit_shrd16c        STEPNAME(emit_shrd16c)
@@ -1186,7 +1203,6 @@ void* rv64_next(x64emu_t* emu, uintptr_t addr);
 
 #define fpu_pushcache       STEPNAME(fpu_pushcache)
 #define fpu_popcache        STEPNAME(fpu_popcache)
-#define fpu_reset           STEPNAME(fpu_reset)
 #define fpu_reset_cache     STEPNAME(fpu_reset_cache)
 #define fpu_propagate_stack STEPNAME(fpu_propagate_stack)
 #define fpu_purgecache      STEPNAME(fpu_purgecache)
@@ -1291,8 +1307,9 @@ void emit_ror32(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, int s2, int s
 void emit_rol32c(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, uint32_t c, int s3, int s4);
 void emit_ror32c(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, uint32_t c, int s3, int s4);
 void emit_shrd32c(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, int s2, uint32_t c, int s3, int s4);
-void emit_shld32c(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, int s2, uint32_t c, int s3, int s4, int s5);
-void emit_shld32(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, int s2, int s5, int s3, int s4);
+void emit_shld32c(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, int s2, uint32_t c, int s3, int s4);
+void emit_shrd32(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, int s2, int s5, int s3, int s4, int s6);
+void emit_shld32(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, int s2, int s5, int s3, int s4, int s6);
 void emit_shrd16c(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, int s2, uint32_t c, int s3, int s4);
 void emit_shld16c(dynarec_rv64_t* dyn, int ninst, rex_t rex, int s1, int s2, uint32_t c, int s3, int s4, int s5);
 
@@ -1390,8 +1407,6 @@ void sse_purge07cache(dynarec_rv64_t* dyn, int ninst, int s1);
 void sse_reflect_reg(dynarec_rv64_t* dyn, int ninst, int a);
 
 // common coproc helpers
-// reset the cache
-void fpu_reset(dynarec_rv64_t* dyn);
 // reset the cache with n
 void fpu_reset_cache(dynarec_rv64_t* dyn, int ninst, int reset_n);
 // propagate stack state
@@ -1584,5 +1599,15 @@ uintptr_t dynarec64_F30F(dynarec_rv64_t* dyn, uintptr_t addr, uintptr_t ip, int 
 
 #define FCOMS(v1, v2, s1, s2, s3, s4, s5) FCOM(S, v1, v2, s1, s2, s3, s4, s5)
 #define FCOMD(v1, v2, s1, s2, s3, s4, s5) FCOM(D, v1, v2, s1, s2, s3, s4, s5)
+
+// reg = (reg < -32768) ? -32768 : ((reg > 32767) ? 32767 : reg)
+#define SAT16(reg, s)             \
+    LUI(s, 0xFFFF8); /* -32768 */ \
+    BGE(reg, s, 4 + 2 * 4);       \
+    MV(reg, s);                   \
+    J(4 + 4 * 3);                 \
+    LUI(s, 8); /* 32768 */        \
+    BLT(reg, s, 4 + 4);           \
+    ADDIW(reg, s, -1);
 
 #endif //__DYNAREC_RV64_HELPER_H__
